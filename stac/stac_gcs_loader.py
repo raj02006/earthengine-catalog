@@ -10,6 +10,8 @@ from typing_extensions import Self
 from google.cloud import storage
 from google.cloud.storage import blob
 import iso8601
+from tenacity import retry, stop_after_attempt, wait_exponential
+from tqdm import tqdm
 
 from stac import bboxes
 from stac import stac_lib as stac
@@ -129,57 +131,54 @@ class CollectionList(Sequence[stac.Collection]):
 
 
 class Catalog:
-  """Class containing all collections in the EE STAC catalog."""
+    """Class containing all collections in the EE STAC catalog."""
 
-  collections: CollectionList
+    collections: CollectionList
 
-  def __init__(self, storage_client: storage.Client):
-    self.collections = CollectionList(self._load_collections(storage_client))
+    def __init__(self, storage_client: storage.Client):
+        self.collections = CollectionList(self._load_collections(storage_client))
 
-  def _read_file(self, file_blob: blob.Blob) -> stac.Collection:
-    """Reads the contents of a file from the specified bucket."""
-    file_contents = file_blob.download_as_string().decode()
-    return stac.Collection(json.loads(file_contents))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    def _read_file(self, file_blob: blob.Blob) -> stac.Collection:
+        """Reads the contents of a file from the specified bucket with retry logic."""
+        file_contents = file_blob.download_as_string().decode()
+        return stac.Collection(json.loads(file_contents))
 
-  def _read_files(
-      self, file_blobs: list[blob.Blob]
-  ) -> list[stac.Collection]:
-    """Processes files in parallel."""
-    result = []
-    with futures.ThreadPoolExecutor(max_workers=10) as executor:
-      file_futures = [
-          executor.submit(self._read_file, file_blob)
-          for file_blob in file_blobs
-      ]
-      for future in file_futures:
-        result.append(future.result())
-    return result
+    def _read_files(self, file_blobs: list[blob.Blob]) -> list[stac.Collection]:
+        """Processes files in parallel with a progress bar."""
+        result = []
+        with futures.ThreadPoolExecutor(max_workers=10) as executor:
+            file_futures = [
+                executor.submit(self._read_file, file_blob)
+                for file_blob in file_blobs
+            ]
+            for future in tqdm(futures.as_completed(file_futures), total=len(file_futures), desc="Reading files"):
+                result.append(future.result())
+        return result
 
-  def _load_collections(
-      self, storage_client: storage.Client
-  ) -> Sequence[stac.Collection]:
-    """Loads all EE STAC JSON files from GCS, with datetimes as objects."""
-    bucket = storage_client.get_bucket('earthengine-stac')
-    files = [
-        x
-        for x in bucket.list_blobs(prefix='catalog/')
-        if x.name.endswith('.json')
-        and not x.name.endswith('/catalog.json')
-        and not x.name.endswith('/units.json')
-    ]
-    logging.warning('Found %d files, loading...', len(files))
-    stac_objects = self._read_files(files)
+    def _load_collections(self, storage_client: storage.Client) -> Sequence[stac.Collection]:
+        """Loads all EE STAC JSON files from GCS, with datetimes as objects."""
+        bucket = storage_client.get_bucket('earthengine-stac')
+        files = [
+            x
+            for x in bucket.list_blobs(prefix='catalog/')
+            if x.name.endswith('.json')
+            and not x.name.endswith('/catalog.json')
+            and not x.name.endswith('/units.json')
+        ]
+        logging.warning('Found %d files, loading...', len(files))
+        stac_objects = self._read_files(files)
 
-    res = []
-    for c in stac_objects:
-      if c.is_deprecated():
-        continue
-      res.append(c)
-    logging.warning(
-        'Loaded %d collections (skipping deprecated ones)', len(res)
-    )
-    # Returning a tuple for immutability.
-    return tuple(res)
+        res = []
+        for c in stac_objects:
+            if c.is_deprecated():
+                continue
+            res.append(c)
+        logging.warning(
+            'Loaded %d collections (skipping deprecated ones)', len(res)
+        )
+        # Returning a tuple for immutability.
+        return tuple(res)
 
 
 def main():

@@ -4,7 +4,8 @@ from concurrent import futures
 import datetime
 import json
 import logging
-from typing import Iterable, Optional, Self, Sequence
+from typing import Iterable, Optional, Sequence
+from typing_extensions import Self
 
 from google.cloud import storage
 from google.cloud.storage import blob

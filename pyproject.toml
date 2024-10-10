@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "earthengine_catalog"
+name = "stac"
 version = "0.1.0"
 description = "A library for accessing Earth Engine catalog data."
 authors = ["Google Earth Engine Team <earthengine@google.com>"]

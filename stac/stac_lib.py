@@ -6,6 +6,8 @@ import dataclasses
 import datetime
 import enum
 import functools
+import json
+import re
 from typing import Any, Iterable, Iterator, Optional, Sequence, Union
 
 from absl import logging
@@ -402,6 +404,10 @@ class Collection:
 
   def public_id(self) -> str:
     return self['id']
+  
+  def normalized_id(self) -> str:
+    """Public id with underscores instead of backslashes. Ex NASA/GPM/IMERG/MONTHLY -> NASA_GPM_IMERG_MONTHLY. """
+    return self['id'].replace('/', '_')
 
   def dataset_type(self) -> stac_checker.GeeType:
     return stac_checker.GeeType(self.stac_json['gee:type'])
@@ -451,6 +457,30 @@ class Collection:
 
   def set_end(self, dt: datetime.datetime):
     self.stac_json['extent']['temporal']['interval'][0][1] = iso_format(dt)
+
+  def temporal_resolution_str(self) -> str:
+    '''Returns a string version of the temporal resolution ex: "5 days".'''
+    interval_dict = self.stac_json.get('gee:interval')
+    if not interval_dict:
+      return ""
+    return f"{interval_dict['interval']} {interval_dict['unit']}"
+  
+  def spatial_resolution_m(self) -> float:
+    '''Returns a string version of the spatial resolution ex: "30 m".'''
+    summaries = self.stac_json.get('summaries')
+    if not summaries:
+      return -1
+    if summaries.get('gsd'):
+      return summaries.get('gsd')[0]
+
+    # Fallback for cases where the stac does not follow convention.
+    gsd_lst = re.findall(r'"gsd": (\d+)', json.dumps(self.stac_json))
+
+    if len(gsd_lst) > 0:
+      return float(gsd_lst[0])
+
+    return -1
+    
 
   @listify
   def links(self, rel: Optional[Rel] = None) -> Iterator[Link]:
@@ -586,6 +616,20 @@ class Collection:
 
   def in_beta(self) -> bool:
     return self.get(stac_checker.GEE_STATUS) == stac_checker.Status.BETA
+  
+  def catalog_url(self):
+    links = self.stac_json['links']
+    for link in links:
+      if 'rel' in link and link['rel'] == 'catalog':
+        return link['href']
+
+      # Ideally there would be a 'catalog' link but sometimes there isn't.
+      base_url = "https://developers.google.com/earth-engine/datasets/catalog/"
+      if link['href'].startswith(base_url):
+        return link['href'].split('#')[0]
+
+    logging.warning(f"No catalog link found for {self.public_id()}")
+    return ""
 
 
 class Catalog:

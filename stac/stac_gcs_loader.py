@@ -4,8 +4,13 @@ from concurrent import futures
 import datetime
 import json
 import logging
+import pandas as pd
 from typing import Iterable, Optional, Sequence
 from typing_extensions import Self
+import re
+from contextlib import redirect_stdout
+import geemap
+import io
 
 from google.cloud import storage
 from google.cloud.storage import blob
@@ -130,6 +135,66 @@ class CollectionList(Sequence[stac.Collection]):
     return self.__class__(result)
 
 
+  def sort_by_spatial_resolution(self, reverse=False):
+        """
+        Sorts the collections based on their spatial resolution.
+        Collections with spatial_resolution_m() == -1 are pushed to the end.
+
+        Args:
+            reverse (bool): If True, sort in descending order (highest resolution first).
+                            If False (default), sort in ascending order (lowest resolution first).
+
+        Returns:
+            CollectionList: A new CollectionList instance with sorted collections.
+        """
+        def sort_key(collection):
+            resolution = collection.spatial_resolution_m()
+            if resolution == -1:
+                return float('inf') if not reverse else float('-inf')
+            return resolution
+
+        sorted_collections = sorted(
+            self._collections,
+            key=sort_key,
+            reverse=reverse
+        )
+        return self.__class__(sorted_collections)
+
+
+  def limit(self, n: int):
+    """
+    Returns a new CollectionList containing the first n entries.
+
+    Args:
+        n (int): The number of entries to include in the new list.
+
+    Returns:
+        CollectionList: A new CollectionList instance with at most n collections.
+    """
+    return self.__class__(self._collections[:n])
+
+
+  def to_df(self):
+    """Converts a collection list to a dataframe with a select set of fields."""
+
+    rows = []
+    for col in self._collections:
+      # Remove text in parens in dataset name.
+      short_title = re.sub(r'\([^)]*\)', '', col.get('title')).strip()
+
+      row = {
+          'id': col.public_id(),
+          'name': short_title,
+          'temp_res': col.temporal_resolution_str(),
+          'spatial_res_m': col.spatial_resolution_m(),
+          'earliest': col.start().strftime("%Y-%m-%d"),
+          'latest': col.end().strftime("%Y-%m-%d"),
+          'url': col.catalog_url()
+      }
+      rows.append(row)
+    return pd.DataFrame(rows)
+
+
 class Catalog:
     """Class containing all collections in the EE STAC catalog."""
 
@@ -138,7 +203,7 @@ class Catalog:
     def __init__(self, storage_client: storage.Client):
         self.collections = CollectionList(self._load_collections(storage_client))
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
     def _read_file(self, file_blob: blob.Blob) -> stac.Collection:
         """Reads the contents of a file from the specified bucket with retry logic."""
         file_contents = file_blob.download_as_string().decode()
@@ -167,7 +232,8 @@ class Catalog:
             and not x.name.endswith('/units.json')
         ]
         logging.warning('Found %d files, loading...', len(files))
-        stac_objects = self._read_files(files)
+        
+        stac_objects = self._read_files(files[:50])
 
         res = []
         for c in stac_objects:
@@ -179,6 +245,59 @@ class Catalog:
         )
         # Returning a tuple for immutability.
         return tuple(res)
+    
+class SampleCode():
+  """Class containing sample code snippets for each dataset in the public datat catalog."""
+
+  def __init__(self, storage_client: storage.Client):
+      self.code_samples_dict = self._load_all_code_samples(storage_client)
+
+  def js_code(self, collection_id: str):
+     normalized_id = collection_id.replace('/', '_')
+     return self.code_samples_dict.get(normalized_id)['js_code']
+  
+  def python_code(self, collection_id: str):
+     normalized_id = collection_id.replace('/', '_')
+     return self.code_samples_dict.get(normalized_id)['py_code']
+
+      
+  def _load_all_code_samples(self, storage_client: storage.Client):
+    """Loads js + py example scripts from GCS into dict keyed by dataset ID."""
+
+    # Get json file from GCS bucket
+    # 'gs://earthengine-catalog/catalog/example_scripts.json'
+    bucket = storage_client.get_bucket('earthengine-catalog')
+    blob= bucket.blob('catalog/example_scripts.json')
+    file_contents = blob.download_as_string().decode()
+    data = json.loads(file_contents)
+
+    # Flatten json to get a map from ID (using '_' rather than '/') to code
+    # sample.
+    all_datasets_by_provider = data[0]['contents']
+    code_samples_dict = {}
+    for provider in all_datasets_by_provider:
+      for dataset in provider['contents']:
+        js_code = dataset['code']
+        py_code = self._make_python_code_sample(js_code)
+
+        code_samples_dict[dataset['name']] = {
+            'js_code': js_code, 'py_code': py_code}
+
+    return code_samples_dict
+  
+  def _make_python_code_sample(self, js_code: str) -> str:
+    """Converts EE JS code into python."""
+
+    # geemap appears to have some stray print statements.
+    _ = io.StringIO()
+    with redirect_stdout(_):
+      code_list = geemap.js_snippet_to_py(js_code,
+                                      add_new_cell=False,
+                                      import_ee=False,
+                                      import_geemap=False,
+                                      show_map=False)
+    return ''.join(code_list)
+
 
 
 def main():
@@ -187,20 +306,18 @@ def main():
   collections = catalog.collections
 
   # Example usage
-  start_time = iso8601.parse_date('2022-01-01T00:00:00Z')
-  end_time = iso8601.parse_date('2022-12-31T23:59:59Z')
-  # filtered_by_interval = collections.filter_by_interval((start_time, end_time))
-  # print(f'Collections filtered by time interval ({start_time} - {end_time}):')
-  # print(len(filtered_by_interval))
-
-  # filtered_by_time = collections.filter_by_datetime(start_time)
-  # print(f'Collections filtered by time {start_time}:')
-  # print(len(filtered_by_time))
-
   bbox = bboxes.BBox.from_list([-120, 30, -100, 40])
   filtered_by_bbox = collections.filter_by_bounding_box(bbox)
+
   print(f'\nCollections filtered by bounding box {bbox}:')
   print(len(filtered_by_bbox))
+
+  print(collections.limit(5).sort_by_spatial_resolution().to_df())
+
+  sample_code = SampleCode(storage_client)
+  print(sample_code.python_code('LANDSAT/LC09/C02/T1_L2'))
+
+
 
 
 if __name__ == '__main__':

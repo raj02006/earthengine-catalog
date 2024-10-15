@@ -20,7 +20,7 @@ python = "^3.9"
 google-cloud-aiplatform = "^1.18.0"
 iso8601 = "^2.1.0"
 typing_extensions = "^4.0.0"
-checker = { path = "checker", develop = true }  # Define checker as a main dependency
+checker = { path = "checker" }
 
 [tool.poetry.group.checker.dependencies]
 absl-py = "^1.0.0"

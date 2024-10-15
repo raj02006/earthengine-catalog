@@ -189,13 +189,13 @@ def main():
   # Example usage
   start_time = iso8601.parse_date('2022-01-01T00:00:00Z')
   end_time = iso8601.parse_date('2022-12-31T23:59:59Z')
-  filtered_by_interval = collections.filter_by_interval((start_time, end_time))
-  print(f'Collections filtered by time interval ({start_time} - {end_time}):')
-  print(len(filtered_by_interval))
+  # filtered_by_interval = collections.filter_by_interval((start_time, end_time))
+  # print(f'Collections filtered by time interval ({start_time} - {end_time}):')
+  # print(len(filtered_by_interval))
 
-  filtered_by_time = collections.filter_by_datetime(start_time)
-  print(f'Collections filtered by time {start_time}:')
-  print(len(filtered_by_time))
+  # filtered_by_time = collections.filter_by_datetime(start_time)
+  # print(f'Collections filtered by time {start_time}:')
+  # print(len(filtered_by_time))
 
   bbox = bboxes.BBox.from_list([-120, 30, -100, 40])
   filtered_by_bbox = collections.filter_by_bounding_box(bbox)

@@ -4,6 +4,7 @@ from concurrent import futures
 import datetime
 import json
 import logging
+from pathlib import Path
 import pandas as pd
 from typing import Iterable, Optional, Sequence
 from typing_extensions import Self
@@ -187,8 +188,8 @@ class CollectionList(Sequence[stac.Collection]):
           'name': short_title,
           'temp_res': col.temporal_resolution_str(),
           'spatial_res_m': col.spatial_resolution_m(),
-          'earliest': col.start().strftime("%Y-%m-%d"),
-          'latest': col.end().strftime("%Y-%m-%d"),
+          # 'earliest': col.start().strftime("%Y-%m-%d"),
+          # 'latest': col.end().strftime("%Y-%m-%d"),
           'url': col.catalog_url()
       }
       rows.append(row)
@@ -200,8 +201,8 @@ class Catalog:
 
     collections: CollectionList
 
-    def __init__(self, storage_client: storage.Client):
-        self.collections = CollectionList(self._load_collections(storage_client))
+    def __init__(self, storage_client: storage.Client, local_path: str = ''):
+        self.collections = CollectionList(self._load_collections(storage_client, local_path))
 
     @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
     def _read_file(self, file_blob: blob.Blob) -> stac.Collection:
@@ -220,20 +221,54 @@ class Catalog:
             for future in tqdm(futures.as_completed(file_futures), total=len(file_futures), desc="Reading files"):
                 result.append(future.result())
         return result
+    
+    def _read_local_files(self, directory):
+      json_data = []
+      directory_path = Path(directory)
 
-    def _load_collections(self, storage_client: storage.Client) -> Sequence[stac.Collection]:
-        """Loads all EE STAC JSON files from GCS, with datetimes as objects."""
-        bucket = storage_client.get_bucket('earthengine-stac')
-        files = [
-            x
-            for x in bucket.list_blobs(prefix='catalog/')
-            if x.name.endswith('.json')
+      if not directory_path.is_dir():
+          raise ValueError(f"The specified path '{directory}' is not a valid directory.")
+      
+      paths = directory_path.glob('**/*.json')
+      # file_names = [str(path) for path in paths]
+
+      paths = self._filter_files(paths)
+      print(paths)
+      # import pdb; pdb.set_trace()
+
+      for file_path in paths:
+        try:
+          with open(file_path, 'r') as file:
+            json_data.append(stac.Collection(json.load(file)))
+        except json.JSONDecodeError:
+          print(f"Error decoding JSON in file: {file_path}")
+        except Exception as e:
+          print(f"Error reading file {file_path}: {str(e)}")
+
+      return json_data
+    
+    def _filter_files(self, files_list):
+      files = []
+      for x in files_list:
+        if (x.name.endswith('.json')
             and not x.name.endswith('/catalog.json')
             and not x.name.endswith('/units.json')
-        ]
+            and not x.name.endswith('/catalog_deprecated.json')):
+          files.append(x)
+      return files
+
+    
+
+    def _load_collections(self, storage_client: storage.Client, local_directory: str = '') -> Sequence[stac.Collection]:
+        """Loads all EE STAC JSON files from GCS, with datetimes as objects."""
+        bucket = storage_client.get_bucket('earthengine-stac')
+        files = self._filter_files(bucket.list_blobs(prefix='catalog/'))
         logging.warning('Found %d files, loading...', len(files))
-        
-        stac_objects = self._read_files(files[:50])
+
+        if local_directory:
+           stac_objects = self._read_local_files(local_directory)
+        else:
+          stac_objects = self._read_files(files)
 
         res = []
         for c in stac_objects:
@@ -255,11 +290,6 @@ class SampleCode():
   def js_code(self, collection_id: str):
      normalized_id = collection_id.replace('/', '_')
      return self.code_samples_dict.get(normalized_id)['js_code']
-  
-  def python_code(self, collection_id: str):
-     normalized_id = collection_id.replace('/', '_')
-     return self.code_samples_dict.get(normalized_id)['py_code']
-
       
   def _load_all_code_samples(self, storage_client: storage.Client):
     """Loads js + py example scripts from GCS into dict keyed by dataset ID."""
@@ -278,31 +308,31 @@ class SampleCode():
     for provider in all_datasets_by_provider:
       for dataset in provider['contents']:
         js_code = dataset['code']
-        py_code = self._make_python_code_sample(js_code)
-
         code_samples_dict[dataset['name']] = {
-            'js_code': js_code, 'py_code': py_code}
+            'js_code': js_code}
 
     return code_samples_dict
   
-  def _make_python_code_sample(self, js_code: str) -> str:
-    """Converts EE JS code into python."""
+def make_python_code_sample(js_code: str) -> str:
+  """Converts EE JS code into python."""
 
-    # geemap appears to have some stray print statements.
-    _ = io.StringIO()
-    with redirect_stdout(_):
-      code_list = geemap.js_snippet_to_py(js_code,
-                                      add_new_cell=False,
-                                      import_ee=False,
-                                      import_geemap=False,
-                                      show_map=False)
-    return ''.join(code_list)
+  # geemap appears to have some stray print statements.
+  _ = io.StringIO()
+  with redirect_stdout(_):
+    code_list = geemap.js_snippet_to_py(js_code,
+                                    add_new_cell=False,
+                                    import_ee=False,
+                                    import_geemap=False,
+                                    show_map=False)
+  return ''.join(code_list)
 
 
 
 def main():
   storage_client = storage.Client()
+  # catalog = Catalog(storage_client, '/Users/reneejohnston/google_projects/dataset_search/earthengine_stac_bucket/catalog/')
   catalog = Catalog(storage_client)
+
   collections = catalog.collections
 
   # Example usage
@@ -315,7 +345,9 @@ def main():
   print(collections.limit(5).sort_by_spatial_resolution().to_df())
 
   sample_code = SampleCode(storage_client)
-  print(sample_code.python_code('LANDSAT/LC09/C02/T1_L2'))
+  js_code = sample_code.js_code('LANDSAT/LC09/C02/T1_L2')
+  python_code = make_python_code_sample(js_code)
+  # print(python_code)
 
 
 
